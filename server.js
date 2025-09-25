@@ -1,5 +1,5 @@
 // C:\ScentedSoleMates_SUPREME4\backend\server.js
-// FIXED VERSION with proper NOT IN filter
+// COMPLETE VERSION with all fixes
 
 require('dotenv').config();
 const express = require('express');
@@ -128,7 +128,7 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// 3. Get own profile (CRITICAL FIX - NEW ENDPOINT)
+// 3. Get own profile
 app.get('/api/profile', authenticate, async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -151,9 +151,42 @@ app.get('/api/profile', authenticate, async (req, res) => {
   }
 });
 
-// 4. Get profiles to swipe
+// 4. NEW - Check if user can swipe (has photos)
+app.get('/api/can-swipe', authenticate, async (req, res) => {
+  try {
+    const { data: photos } = await supabase
+      .from('photos')
+      .select('id')
+      .eq('user_id', req.userId);
+    
+    const canSwipe = photos && photos.length > 0;
+    res.json({ 
+      canSwipe, 
+      photoCount: photos?.length || 0,
+      message: canSwipe ? 'Ready to swipe' : 'You must upload at least one photo to see other profiles'
+    });
+  } catch (err) {
+    console.error('Can swipe check error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// 5. Get profiles to swipe - WITH ALL FIXES
 app.get('/api/profiles', authenticate, async (req, res) => {
   try {
+    // First check if user has photos
+    const { data: userPhotos } = await supabase
+      .from('photos')
+      .select('id')
+      .eq('user_id', req.userId);
+      
+    if (!userPhotos || userPhotos.length === 0) {
+      return res.status(403).json({ 
+        error: 'You must upload a photo before viewing profiles',
+        requiresPhoto: true 
+      });
+    }
+    
     // Get current user's city
     const { data: currentUser, error: userError } = await supabase
       .from('users')
@@ -179,10 +212,10 @@ app.get('/api/profiles', authenticate, async (req, res) => {
       .from('users')
       .select('id, username, age, city, bio, photos(*)')
       .eq('city', currentUser.city.toLowerCase())
-      .limit(10)
+      .limit(20)
       .order('created_at', { ascending: false });
       
-    // CRITICAL FIX: Properly format the NOT IN filter with quoted UUIDs
+    // Properly format the NOT IN filter with quoted UUIDs
     if (swipedIds.length > 0) {
       const quotedIds = swipedIds.map(id => `"${id}"`).join(',');
       query = query.not('id', 'in', `(${quotedIds})`);
@@ -195,20 +228,35 @@ app.get('/api/profiles', authenticate, async (req, res) => {
       return res.status(500).json({ error: 'Failed to fetch profiles' });
     }
     
-    res.json(data || []);
+    // FILTER OUT USERS WITHOUT PHOTOS
+    const validProfiles = (data || []).filter(profile => 
+      profile.photos && profile.photos.length > 0
+    );
+    
+    res.json(validProfiles);
   } catch (err) {
     console.error('Profiles error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// 5. Swipe endpoint
+// 6. Swipe endpoint - WITH ALL FIXES
 app.post('/api/swipe', authenticate, async (req, res) => {
   try {
     const { targetId, direction } = req.body;
     
     if (!targetId || !direction) {
       return res.status(400).json({ error: 'Target and direction required' });
+    }
+    
+    // PREVENT SELF-SWIPING
+    if (targetId === req.userId) {
+      return res.status(400).json({ error: 'Cannot swipe on yourself' });
+    }
+    
+    // Validate direction
+    if (!['like', 'pass'].includes(direction)) {
+      return res.status(400).json({ error: 'Invalid swipe direction' });
     }
     
     // Record the swipe
@@ -236,16 +284,26 @@ app.post('/api/swipe', authenticate, async (req, res) => {
         .single();
         
       if (reciprocal) {
-        // Create match with LEAST/GREATEST to avoid constraint issues
-        const { error: matchError } = await supabase
+        // Check if match already exists to avoid duplicate
+        const { data: existingMatch } = await supabase
           .from('matches')
-          .insert({ 
-            user1_id: req.userId,
-            user2_id: targetId
-          });
-          
-        if (matchError) {
-          console.error('Match creation error:', matchError);
+          .select('id')
+          .or(`and(user1_id.eq.${req.userId},user2_id.eq.${targetId}),and(user1_id.eq.${targetId},user2_id.eq.${req.userId})`)
+          .single();
+        
+        if (!existingMatch) {
+          // Create match
+          const { error: matchError } = await supabase
+            .from('matches')
+            .insert({ 
+              user1_id: req.userId,
+              user2_id: targetId
+            });
+            
+          if (matchError) {
+            console.error('Match creation error:', matchError);
+            // Don't fail the whole request if match creation fails
+          }
         }
         
         return res.json({ match: true });
@@ -259,7 +317,7 @@ app.post('/api/swipe', authenticate, async (req, res) => {
   }
 });
 
-// 6. Get matches endpoint
+// 7. Get matches endpoint
 app.get('/api/matches', authenticate, async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -300,7 +358,7 @@ app.get('/api/matches', authenticate, async (req, res) => {
   }
 });
 
-// 7. Upload photo endpoint
+// 8. Upload photo endpoint
 app.post('/api/upload', authenticate, upload.single('photo'), async (req, res) => {
   try {
     if (!req.file) {
@@ -358,13 +416,13 @@ app.post('/api/upload', authenticate, upload.single('photo'), async (req, res) =
   }
 });
 
-// 8. Update profile endpoint
+// 9. Update profile endpoint
 app.put('/api/profile', authenticate, async (req, res) => {
   try {
     const { bio, contact_method, contact_info } = req.body;
     
     const updates = {};
-    if (bio !== undefined) updates.bio = bio.substring(0, 500); // Limit bio length
+    if (bio !== undefined) updates.bio = bio.substring(0, 500);
     if (contact_method) updates.contact_method = contact_method;
     if (contact_info !== undefined) updates.contact_info = contact_info;
     
