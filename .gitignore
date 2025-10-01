@@ -1,23 +1,46 @@
-# C:\ScentedSoleMates_SUPREME4\backend\.gitignore
-
 # Dependencies
 node_modules/
 package-lock.json
 
-# Environment variables
+# Environment variables - CRITICAL
 .env
 .env.local
 .env.production
+.env.development
+.env.*
 
 # Logs
 logs/
 *.log
 npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
 # OS files
 .DS_Store
 Thumbs.db
+Desktop.ini
 
 # IDE
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
+
+# Testing
+coverage/
+.nyc_output/
+
+# Build outputs (if any)
+dist/
+build/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Upload testing files
+uploads/
+test-uploads/
