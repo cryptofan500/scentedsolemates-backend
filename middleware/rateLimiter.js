@@ -18,13 +18,13 @@ const messageLimiter = rateLimit({
 });
 
 const signupLimiter = rateLimit({
-  windowMs: 24 * 60 * 60 * 1000, // 24 hours
-  max: 3, // 3 signups per IP per day
-  message: 'Too many registration attempts from this IP. Try again tomorrow.',
+  windowMs: 60 * 1000, // 1 minute (CHANGED from 24 hours)
+  max: 3, // 3 signups per minute per IP (CHANGED from per day)
+  message: 'Too many registration attempts from this IP. Try again in 1 minute.',
   standardHeaders: true,
   legacyHeaders: false,
   skipSuccessfulRequests: false,
-  keyGenerator: (req) => req.ip, // Use IP instead of user for signup
+  keyGenerator: (req) => req.ip,
 });
 
 const uploadLimiter = rateLimit({

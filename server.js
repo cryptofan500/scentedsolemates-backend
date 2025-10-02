@@ -1,4 +1,4 @@
-// COMPLETE VERSION with defensive /api/register endpoint
+// COMPLETE VERSION with defensive /api/register endpoint + PASSWORD VALIDATION + ERROR HANDLING
 
 require('dotenv').config();
 const express = require('express');
@@ -24,7 +24,9 @@ const {
 const app = express();
 app.set('trust proxy', 1);
 app.use(cors());
-app.use(express.json());
+// FIX: Added 10mb limits to prevent 413 Payload Too Large errors
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ limit: '10mb', extended: true }));
 app.use(defaultLimiter);
 
 // Initialize Supabase with service key (server-side only)
@@ -78,7 +80,7 @@ app.get('/health', (req, res) => {
   });
 });
 
-// 1. Register endpoint with DEFENSIVE NORMALIZATION
+// 1. Register endpoint with DEFENSIVE NORMALIZATION + PASSWORD VALIDATION
 app.post('/api/register', signupLimiter, async (req, res) => {
   try {
     // Log exactly what arrived from client
@@ -136,6 +138,24 @@ app.post('/api/register', signupLimiter, async (req, res) => {
     if (!/^[a-zA-Z\s\-]{2,50}$/i.test(city)) {
       return res.status(400).json({ error: 'Invalid city name' });
     }
+    
+    // PASSWORD VALIDATION - Query 3/4
+    if (password.length < 10) {
+      return res.status(400).json({ error: 'Password must be at least 10 characters' });
+    }
+    if (!/[A-Z]/.test(password)) {
+      return res.status(400).json({ error: 'Password must contain at least 1 uppercase letter' });
+    }
+    if (!/[a-z]/.test(password)) {
+      return res.status(400).json({ error: 'Password must contain at least 1 lowercase letter' });
+    }
+    if (!/[0-9]/.test(password)) {
+      return res.status(400).json({ error: 'Password must contain at least 1 number' });
+    }
+    if (!/[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(password)) {
+      return res.status(400).json({ error: 'Password must contain at least 1 special character' });
+    }
+    // END PASSWORD VALIDATION
     
     const password_hash = await bcrypt.hash(password, 10);
     
@@ -581,9 +601,19 @@ app.get('/api/messages/:matchId', authenticate, async (req, res) => {
 // 11. Upload photo with deduplication and rate limiting
 app.post('/api/upload', authenticate, uploadLimiter, upload.single('photo'), validatePhotoUniqueness, validatePhotoType, async (req, res) => {
   try {
+    // FIX: Add logging to confirm Multer parsed the file
+    console.log('[UPLOAD] Request received. File present:', !!req.file);
+    
     if (!req.file) {
+      console.error('[UPLOAD] ERROR: No file in req.file. Multer failed to parse.');
       return res.status(400).json({ error: 'No file provided' });
     }
+
+    console.log('[UPLOAD] File details:', {
+      originalname: req.file.originalname,
+      size: req.file.size,
+      mimetype: req.file.mimetype
+    });
 
     const allowedTypes = ['image/jpeg', 'image/png', 'image/webp'];
     if (!allowedTypes.includes(req.file.mimetype)) {
@@ -600,7 +630,18 @@ app.post('/api/upload', authenticate, uploadLimiter, upload.single('photo'), val
     }
     
     const randomSuffix = Math.random().toString(36).substring(2, 9);
-    const fileName = `${req.userId}/${Date.now()}-${randomSuffix}.jpg`;
+    
+    // FIX: Determine correct file extension based on mimetype
+    let extension = '.jpg'; // Default
+    if (req.file.mimetype === 'image/png') {
+      extension = '.png';
+    } else if (req.file.mimetype === 'image/webp') {
+      extension = '.webp';
+    }
+    
+    const fileName = `${req.userId}/${Date.now()}-${randomSuffix}${extension}`;
+    
+    console.log('[UPLOAD] Uploading to Supabase Storage:', fileName);
     
     const { error: uploadError } = await supabase.storage
       .from('photos')
@@ -610,9 +651,11 @@ app.post('/api/upload', authenticate, uploadLimiter, upload.single('photo'), val
       });
       
     if (uploadError) {
-      console.error('Storage upload error:', uploadError);
+      console.error('[UPLOAD] Storage upload error:', uploadError);
       return res.status(400).json({ error: 'Failed to upload photo' });
     }
+    
+    console.log('[UPLOAD] Storage upload successful. Getting public URL...');
     
     const { data: { publicUrl } } = supabase.storage
       .from('photos')
@@ -629,13 +672,14 @@ app.post('/api/upload', authenticate, uploadLimiter, upload.single('photo'), val
       });
       
     if (dbError) {
-      console.error('Database photo error:', dbError);
+      console.error('[UPLOAD] Database photo error:', dbError);
       return res.status(400).json({ error: 'Failed to save photo' });
     }
-      
+    
+    console.log('[UPLOAD] Success! URL:', publicUrl);
     res.json({ url: publicUrl, type: req.body?.photo_type });
   } catch (err) {
-    console.error('Upload error:', err);
+    console.error('[UPLOAD] Critical error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -853,11 +897,33 @@ app.post('/api/challenge/complete', authenticate, async (req, res) => {
   }
 });
 
+// ERROR HANDLING MIDDLEWARE - Must be AFTER all routes
+app.use((err, req, res, next) => {
+  // Multer file size error
+  if (err instanceof multer.MulterError) {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ 
+        error: 'Photo must be under 5MB. Please compress or use a smaller image.' 
+      });
+    }
+    return res.status(400).json({ error: `Upload error: ${err.message}` });
+  }
+  
+  // Other upload errors
+  if (err.message && err.message.includes('File')) {
+    return res.status(400).json({ error: err.message });
+  }
+  
+  // Generic server errors
+  console.error('Unhandled error:', err);
+  res.status(500).json({ error: 'Server error. Please try again.' });
+});
+
 // Start server
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ ScentedSoleMates Backend running on port ${PORT}`);
-  console.log(`🔒 Security: Manual email verification, blocks, reports, rate limiting`);
+  console.log(`🔒 Security: Manual email verification, blocks, reports, rate limiting, password validation`);
   console.log(`🎮 Gamification: API endpoints active but disabled in UI`);
   console.log(`💬 Features: Gender filtering, unmatch, messaging`);
   console.log(`🚀 Health check: http://localhost:${PORT}/health`);
