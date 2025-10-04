@@ -1,4 +1,4 @@
-// COMPLETE VERSION with defensive /api/register endpoint + PASSWORD VALIDATION + ERROR HANDLING
+// COMPLETE VERSION with defensive /api/register endpoint + PASSWORD VALIDATION + ERROR HANDLING + LEGAL ROUTES
 
 require('dotenv').config();
 const express = require('express');
@@ -20,6 +20,9 @@ const {
   completeChallenge, 
   getUserChallengeStats 
 } = require('./utils/challenges');
+
+// Import legal routes
+const legalRoutes = require('./routes/legal');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -65,6 +68,9 @@ const authenticate = async (req, res, next) => {
   }
 };
 
+// Use legal routes
+app.use('/api/legal', legalRoutes);
+
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ 
@@ -75,7 +81,8 @@ app.get('/health', (req, res) => {
       security: true,
       gamification: true,
       messaging: true,
-      modes: true
+      modes: true,
+      legal_pages: true
     }
   });
 });
@@ -170,7 +177,7 @@ app.post('/api/register', signupLimiter, async (req, res) => {
         city: city.toLowerCase().trim(),
         gender,
         interested_in: uniqueCanonical, // GUARANTEED to be non-empty array
-        email_verified: false,
+        email_verified: true, // Auto-approve enabled
         mode: 'tease_toes'
       })
       .select()
@@ -188,7 +195,7 @@ app.post('/api/register', signupLimiter, async (req, res) => {
     delete data.password_hash;
     
     console.log('[REGISTER] Success - user created:', data.id);
-    res.json({ token, user: data, message: 'Account created. Awaiting manual approval (usually < 2 hours).' });
+    res.json({ token, user: data, message: 'Account created successfully!' });
   } catch (err) {
     console.error('[REGISTER] Server error:', err);
     res.status(500).json({ error: 'Server error' });
@@ -923,9 +930,9 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ ScentedSoleMates Backend running on port ${PORT}`);
-  console.log(`🔒 Security: Manual email verification, blocks, reports, rate limiting, password validation`);
+  console.log(`🔒 Security: Auto-approval, blocks, reports, rate limiting, password validation`);
   console.log(`🎮 Gamification: API endpoints active but disabled in UI`);
   console.log(`💬 Features: Gender filtering, unmatch, messaging`);
+  console.log(`📄 Legal: Privacy, Terms, Guidelines pages active`);
   console.log(`🚀 Health check: http://localhost:${PORT}/health`);
-  console.log(`⚠️  IMPORTANT: Manually verify users in Supabase dashboard`);
 });
