@@ -1,6 +1,5 @@
 const express = require('express');
 const router = express.Router();
-const { supabase } = require('../config/supabase');
 
 // Get legal document by type
 router.get('/:type', async (req, res) => {
@@ -13,7 +12,8 @@ router.get('/:type', async (req, res) => {
       return res.status(400).json({ error: 'Invalid document type' });
     }
     
-    const { data, error } = await supabase
+    // Use supabase from request object (attached by server.js middleware)
+    const { data, error } = await req.supabase
       .from('legal_documents')
       .select('content, last_updated')
       .eq('doc_type', type)
