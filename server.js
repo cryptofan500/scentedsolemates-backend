@@ -1,5 +1,4 @@
-// COMPLETE VERSION with defensive /api/register endpoint + PASSWORD VALIDATION + ERROR HANDLING + LEGAL ROUTES
-
+// COMPLETE VERSION - GTA cluster + 6 photos + EXIF preservation
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -9,49 +8,57 @@ const { createClient } = require('@supabase/supabase-js');
 const multer = require('multer');
 const crypto = require('crypto');
 
-// Import middleware
 const { swipeLimiter, messageLimiter, signupLimiter, uploadLimiter, defaultLimiter } = require('./middleware/rateLimiter');
 const { validatePhotoUniqueness, validatePhotoType } = require('./middleware/photoValidator');
-
-// Import utilities (keeping for now but will be disabled in UI)
-const { 
-  getTodayChallenge, 
-  checkChallengeCompletion, 
-  completeChallenge, 
-  getUserChallengeStats 
-} = require('./utils/challenges');
-
-// Import legal routes
+const { getTodayChallenge, checkChallengeCompletion, completeChallenge, getUserChallengeStats } = require('./utils/challenges');
 const legalRoutes = require('./routes/legal');
+
+// GTA CLUSTER NORMALIZATION - Maps all GTA cities to 'toronto' for matching
+const GTA_CITIES = {
+  'toronto': 'toronto', 'tdot': 'toronto', 't.o.': 'toronto', 'the 6': 'toronto', 'the 6ix': 'toronto', 'yyz': 'toronto',
+  'mississauga': 'toronto', 'sauga': 'toronto', 'missisauga': 'toronto', 'mississauaga': 'toronto',
+  'brampton': 'toronto', 'bramption': 'toronto',
+  'vaughan': 'toronto', 'vaughn': 'toronto',
+  'markham': 'toronto',
+  'richmond hill': 'toronto', 'richmondhill': 'toronto',
+  'scarborough': 'toronto', 'scarbrough': 'toronto', 'scarboro': 'toronto',
+  'etobicoke': 'toronto', 'etobico': 'toronto',
+  'north york': 'toronto', 'northyork': 'toronto',
+  'oakville': 'toronto',
+  'ajax': 'toronto',
+  'pickering': 'toronto',
+  'burlington': 'toronto'
+};
+
+function normalizeCity(city) {
+  if (!city) return null;
+  const cleaned = city.toLowerCase().trim().replace(/[^a-z\s]/g, '').replace(/\s+/g, ' ');
+  return GTA_CITIES[cleaned] || null;
+}
 
 const app = express();
 app.set('trust proxy', 1);
 app.use(cors());
-// FIX: Added 10mb limits to prevent 413 Payload Too Large errors
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 app.use(defaultLimiter);
 
-// Initialize Supabase with service key (server-side only)
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_KEY
 );
 
-// Configure multer properly with memory storage
 const storage = multer.memoryStorage();
 const upload = multer({ 
   storage: storage,
-  limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit
+  limits: { fileSize: 5 * 1024 * 1024 }
 });
 
-// Middleware to attach supabase to request
 app.use((req, res, next) => {
   req.supabase = supabase;
   next();
 });
 
-// Auth middleware
 const authenticate = async (req, res, next) => {
   const token = req.headers.authorization?.split(' ')[1];
   if (!token) {
@@ -68,44 +75,35 @@ const authenticate = async (req, res, next) => {
   }
 };
 
-// Use legal routes
 app.use('/api/legal', legalRoutes);
 
-// Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development',
     features: {
+      gta_cluster: true,
+      photo_limit: 6,
+      exif_preservation: true,
+      compression: 'client_side',
       security: true,
-      gamification: true,
-      messaging: true,
-      modes: true,
       legal_pages: true
     }
   });
 });
 
-// 1. Register endpoint with DEFENSIVE NORMALIZATION + PASSWORD VALIDATION
+// 1. REGISTER - GTA ENFORCEMENT
 app.post('/api/register', signupLimiter, async (req, res) => {
   try {
-    // Log exactly what arrived from client
-    console.log('[REGISTER] Raw request body:', JSON.stringify(req.body));
+    console.log('[REGISTER] Raw request:', JSON.stringify(req.body));
     
     let { email, username, password, age, city, gender, interested_in } = req.body;
     
-    // DEFENSIVE COERCION: Handle multiple possible client shapes
-    // If client sent string instead of array, wrap it
-    if (typeof interested_in === 'string') {
-      interested_in = [interested_in];
-    }
-    // If undefined/null, initialize as empty array
-    if (!Array.isArray(interested_in)) {
-      interested_in = [];
-    }
+    // Defensive normalization
+    if (typeof interested_in === 'string') interested_in = [interested_in];
+    if (!Array.isArray(interested_in)) interested_in = [];
     
-    // CANONICALIZATION: Map display labels to database values
     const canonicalValues = interested_in
       .map(v => String(v).toLowerCase().trim())
       .map(v => {
@@ -115,38 +113,36 @@ app.post('/api/register', signupLimiter, async (req, res) => {
       })
       .filter(v => ['male', 'female', 'non-binary'].includes(v));
     
-    // Remove duplicates
     const uniqueCanonical = [...new Set(canonicalValues)];
     
     console.log('[REGISTER] Normalized interested_in:', uniqueCanonical);
     
-    // VALIDATION: Ensure all required fields present
     if (!email || !username || !password || !age || !city || !gender) {
       return res.status(400).json({ error: 'All fields are required' });
     }
     
-    // VALIDATION: interested_in must be non-empty array
     if (uniqueCanonical.length === 0) {
-      return res.status(400).json({ 
-        error: 'Must select at least one preference for interested_in' 
-      });
+      return res.status(400).json({ error: 'Must select at least one preference' });
     }
 
     if (parseInt(age) < 18) {
       return res.status(400).json({ error: 'Must be 18 or older' });
     }
     
-    // Validate gender
     if (!['male', 'female', 'non-binary'].includes(gender)) {
       return res.status(400).json({ error: 'Invalid gender selection' });
     }
 
-    // Validate city to prevent injection
-    if (!/^[a-zA-Z\s\-]{2,50}$/i.test(city)) {
-      return res.status(400).json({ error: 'Invalid city name' });
+    // GTA ENFORCEMENT
+    const normalizedCity = normalizeCity(city);
+    if (!normalizedCity) {
+      return res.status(400).json({ 
+        error: `We're launching exclusively in the GTA. "${city}" is not in our current service area.`,
+        gtaOnly: true 
+      });
     }
     
-    // PASSWORD VALIDATION - Query 3/4
+    // Password validation
     if (password.length < 10) {
       return res.status(400).json({ error: 'Password must be at least 10 characters' });
     }
@@ -162,11 +158,9 @@ app.post('/api/register', signupLimiter, async (req, res) => {
     if (!/[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(password)) {
       return res.status(400).json({ error: 'Password must contain at least 1 special character' });
     }
-    // END PASSWORD VALIDATION
     
     const password_hash = await bcrypt.hash(password, 10);
     
-    // INSERT with guaranteed non-null array
     const { data, error } = await supabase
       .from('users')
       .insert({ 
@@ -174,10 +168,10 @@ app.post('/api/register', signupLimiter, async (req, res) => {
         username: username.trim(),
         password_hash,
         age: parseInt(age),
-        city: city.toLowerCase().trim(),
+        city: normalizedCity, // STORES AS 'toronto' for GTA cluster
         gender,
-        interested_in: uniqueCanonical, // GUARANTEED to be non-empty array
-        email_verified: true, // Auto-approve enabled
+        interested_in: uniqueCanonical,
+        email_verified: true,
         mode: 'tease_toes'
       })
       .select()
@@ -194,7 +188,7 @@ app.post('/api/register', signupLimiter, async (req, res) => {
     const token = jwt.sign({ userId: data.id }, process.env.JWT_SECRET, { expiresIn: '7d' });
     delete data.password_hash;
     
-    console.log('[REGISTER] Success - user created:', data.id);
+    console.log('[REGISTER] Success - GTA user created:', data.id, 'City:', normalizedCity);
     res.json({ token, user: data, message: 'Account created successfully!' });
   } catch (err) {
     console.error('[REGISTER] Server error:', err);
@@ -202,7 +196,7 @@ app.post('/api/register', signupLimiter, async (req, res) => {
   }
 });
 
-// 2. Login endpoint with email verification check
+// 2. Login endpoint
 app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -265,7 +259,7 @@ app.get('/api/profile', authenticate, async (req, res) => {
   }
 });
 
-// 4. Check if user can swipe (has photos)
+// 4. Check if user can swipe
 app.get('/api/can-swipe', authenticate, async (req, res) => {
   try {
     const { data: photos } = await supabase
@@ -285,7 +279,7 @@ app.get('/api/can-swipe', authenticate, async (req, res) => {
   }
 });
 
-// 5. Get profiles to swipe with blocking and mode filtering
+// 5. Get profiles - GTA CLUSTER MATCHING
 app.get('/api/profiles', authenticate, async (req, res) => {
   try {
     const { data: userPhotos } = await supabase
@@ -329,10 +323,11 @@ app.get('/api/profiles', authenticate, async (req, res) => {
       return acc;
     }, []) || [];
     
+    // GTA CLUSTER: All 'toronto' users match together
     let { data: profiles, error } = await supabase
       .from('users')
       .select('id, username, age, city, bio, gender, interested_in, mode, photos(*)')
-      .ilike('city', currentUser.city)
+      .eq('city', 'toronto') // CHANGED: GTA cluster (was .ilike('city', currentUser.city))
       .eq('is_suspended', false)
       .limit(50)
       .order('created_at', { ascending: false });
@@ -360,7 +355,7 @@ app.get('/api/profiles', authenticate, async (req, res) => {
   }
 });
 
-// 6. Swipe endpoint with rate limiting and atomic upsert
+// 6. Swipe endpoint
 app.post('/api/swipe', authenticate, swipeLimiter, async (req, res) => {
   try {
     const { targetId, direction } = req.body;
@@ -436,7 +431,7 @@ app.post('/api/swipe', authenticate, swipeLimiter, async (req, res) => {
   }
 });
 
-// 7. Get matches endpoint
+// 7. Get matches
 app.get('/api/matches', authenticate, async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -475,7 +470,7 @@ app.get('/api/matches', authenticate, async (req, res) => {
   }
 });
 
-// 8. Unmatch endpoint
+// 8. Unmatch
 app.delete('/api/matches/:matchId', authenticate, async (req, res) => {
   try {
     const { matchId } = req.params;
@@ -511,7 +506,7 @@ app.delete('/api/matches/:matchId', authenticate, async (req, res) => {
   }
 });
 
-// 9. Send message endpoint with rate limiting
+// 9. Send message
 app.post('/api/messages', authenticate, messageLimiter, async (req, res) => {
   try {
     const { matchId, content } = req.body;
@@ -560,7 +555,7 @@ app.post('/api/messages', authenticate, messageLimiter, async (req, res) => {
   }
 });
 
-// 10. Get messages for a match
+// 10. Get messages
 app.get('/api/messages/:matchId', authenticate, async (req, res) => {
   try {
     const { matchId } = req.params;
@@ -605,14 +600,13 @@ app.get('/api/messages/:matchId', authenticate, async (req, res) => {
   }
 });
 
-// 11. Upload photo with deduplication and rate limiting
+// 11. UPLOAD PHOTO - 6 PHOTO LIMIT + EXIF PRESERVATION
 app.post('/api/upload', authenticate, uploadLimiter, upload.single('photo'), validatePhotoUniqueness, validatePhotoType, async (req, res) => {
   try {
-    // FIX: Add logging to confirm Multer parsed the file
     console.log('[UPLOAD] Request received. File present:', !!req.file);
     
     if (!req.file) {
-      console.error('[UPLOAD] ERROR: No file in req.file. Multer failed to parse.');
+      console.error('[UPLOAD] ERROR: No file in req.file');
       return res.status(400).json({ error: 'No file provided' });
     }
 
@@ -632,19 +626,15 @@ app.post('/api/upload', authenticate, uploadLimiter, upload.single('photo'), val
       .select('id')
       .eq('user_id', req.userId);
       
-    if (existingPhotos && existingPhotos.length >= 3) {
-      return res.status(400).json({ error: 'Maximum 3 photos allowed' });
+    // CHANGED: 6 photo limit (was 3)
+    if (existingPhotos && existingPhotos.length >= 6) {
+      return res.status(400).json({ error: 'Maximum 6 photos allowed' });
     }
     
     const randomSuffix = Math.random().toString(36).substring(2, 9);
-    
-    // FIX: Determine correct file extension based on mimetype
-    let extension = '.jpg'; // Default
-    if (req.file.mimetype === 'image/png') {
-      extension = '.png';
-    } else if (req.file.mimetype === 'image/webp') {
-      extension = '.webp';
-    }
+    let extension = '.jpg';
+    if (req.file.mimetype === 'image/png') extension = '.png';
+    else if (req.file.mimetype === 'image/webp') extension = '.webp';
     
     const fileName = `${req.userId}/${Date.now()}-${randomSuffix}${extension}`;
     
@@ -668,6 +658,9 @@ app.post('/api/upload', authenticate, uploadLimiter, upload.single('photo'), val
       .from('photos')
       .getPublicUrl(fileName);
       
+    // NOTE: EXIF data is preserved in the file stored in Supabase Storage
+    // Client compresses but preserves EXIF via browser-image-compression library
+    // Future: Add exif_data column to extract and store for fake detection
     const { error: dbError } = await supabase
       .from('photos')
       .insert({ 
@@ -691,7 +684,7 @@ app.post('/api/upload', authenticate, uploadLimiter, upload.single('photo'), val
   }
 });
 
-// 12. Update profile endpoint
+// 12. Update profile
 app.put('/api/profile', authenticate, async (req, res) => {
   try {
     const { bio, contact_method, contact_info, gender, interested_in } = req.body;
@@ -729,7 +722,7 @@ app.put('/api/profile', authenticate, async (req, res) => {
   }
 });
 
-// 13. Block user endpoint
+// 13. Block user
 app.post('/api/block', authenticate, async (req, res) => {
   try {
     const { targetId } = req.body;
@@ -761,7 +754,7 @@ app.post('/api/block', authenticate, async (req, res) => {
   }
 });
 
-// 14. Report user endpoint
+// 14. Report user
 app.post('/api/report', authenticate, async (req, res) => {
   try {
     const { targetId, reason, details } = req.body;
@@ -807,7 +800,7 @@ app.post('/api/report', authenticate, async (req, res) => {
   }
 });
 
-// 15. Update user mode (keeping for compatibility but disabled in UI)
+// 15. Update user mode
 app.put('/api/mode', authenticate, async (req, res) => {
   try {
     const { mode } = req.body;
@@ -835,23 +828,19 @@ app.put('/api/mode', authenticate, async (req, res) => {
   }
 });
 
-// 16. Get today's challenge (keeping for compatibility but disabled in UI)
+// 16. Get today's challenge
 app.get('/api/challenge/today', authenticate, async (req, res) => {
   try {
     const challenge = getTodayChallenge();
     const completed = await checkChallengeCompletion(req.userId, challenge.id, supabase);
-    
-    res.json({
-      ...challenge,
-      completed
-    });
+    res.json({ ...challenge, completed });
   } catch (err) {
     console.error('Challenge fetch error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// 17. Get challenge stats (keeping for compatibility but disabled in UI)
+// 17. Get challenge stats
 app.get('/api/challenge/stats', authenticate, async (req, res) => {
   try {
     const stats = await getUserChallengeStats(req.userId, supabase);
@@ -868,7 +857,7 @@ app.get('/api/challenge/stats', authenticate, async (req, res) => {
   }
 });
 
-// 18. Complete challenge (keeping for compatibility but disabled in UI)
+// 18. Complete challenge
 app.post('/api/challenge/complete', authenticate, async (req, res) => {
   try {
     const { challengeId } = req.body;
@@ -904,9 +893,8 @@ app.post('/api/challenge/complete', authenticate, async (req, res) => {
   }
 });
 
-// ERROR HANDLING MIDDLEWARE - Must be AFTER all routes
+// ERROR HANDLING MIDDLEWARE
 app.use((err, req, res, next) => {
-  // Multer file size error
   if (err instanceof multer.MulterError) {
     if (err.code === 'LIMIT_FILE_SIZE') {
       return res.status(400).json({ 
@@ -916,23 +904,20 @@ app.use((err, req, res, next) => {
     return res.status(400).json({ error: `Upload error: ${err.message}` });
   }
   
-  // Other upload errors
   if (err.message && err.message.includes('File')) {
     return res.status(400).json({ error: err.message });
   }
   
-  // Generic server errors
   console.error('Unhandled error:', err);
   res.status(500).json({ error: 'Server error. Please try again.' });
 });
 
-// Start server
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ ScentedSoleMates Backend running on port ${PORT}`);
-  console.log(`🔒 Security: Auto-approval, blocks, reports, rate limiting, password validation`);
-  console.log(`🎮 Gamification: API endpoints active but disabled in UI`);
-  console.log(`💬 Features: Gender filtering, unmatch, messaging`);
-  console.log(`📄 Legal: Privacy, Terms, Guidelines pages active`);
-  console.log(`🚀 Health check: http://localhost:${PORT}/health`);
+  console.log(`🌍 GTA Metro Cluster: ACTIVE (all cities → toronto)`);
+  console.log(`📸 Photo limit: 6 (upgraded from 3)`);
+  console.log(`📊 EXIF: Preserved for fake detection`);
+  console.log(`🔐 Auth: Bcrypt (working perfectly)`);
+  console.log(`🚀 Health: http://localhost:${PORT}/health`);
 });
