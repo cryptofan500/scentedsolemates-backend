@@ -1,4 +1,4 @@
-// COMPLETE VERSION - GTA cluster + 6 photos + EXIF preservation
+// COMPLETE VERSION - Security hardened + GTA cluster + 6 photos + EXIF preservation
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -8,12 +8,25 @@ const { createClient } = require('@supabase/supabase-js');
 const multer = require('multer');
 const crypto = require('crypto');
 
-const { swipeLimiter, messageLimiter, signupLimiter, uploadLimiter, defaultLimiter } = require('./middleware/rateLimiter');
+// Security middleware
+const helmet = require('helmet');
+const { emailValidationMiddleware } = require('./middleware/emailValidation');
+
+// ALL rate limiters from centralized file
+const { 
+  globalLimiter, 
+  authLimiter, 
+  swipeLimiter, 
+  messageLimiter, 
+  uploadLimiter 
+} = require('./middleware/rateLimiter');
+
+// Existing middleware
 const { validatePhotoUniqueness, validatePhotoType } = require('./middleware/photoValidator');
 const { getTodayChallenge, checkChallengeCompletion, completeChallenge, getUserChallengeStats } = require('./utils/challenges');
 const legalRoutes = require('./routes/legal');
 
-// GTA CLUSTER NORMALIZATION - Maps all GTA cities to 'toronto' for matching
+// GTA CLUSTER NORMALIZATION
 const GTA_CITIES = {
   'toronto': 'toronto', 'tdot': 'toronto', 't.o.': 'toronto', 'the 6': 'toronto', 'the 6ix': 'toronto', 'yyz': 'toronto',
   'mississauga': 'toronto', 'sauga': 'toronto', 'missisauga': 'toronto', 'mississauaga': 'toronto',
@@ -36,29 +49,41 @@ function normalizeCity(city) {
   return GTA_CITIES[cleaned] || null;
 }
 
+// App initialization with security
 const app = express();
-app.set('trust proxy', 1);
-app.use(cors());
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ limit: '10mb', extended: true }));
-app.use(defaultLimiter);
+app.set('trust proxy', 1); // CRITICAL for Render
 
+// Security headers
+app.use(helmet());
+app.use(cors());
+
+// Body parsing with security limits
+app.use(express.json({ limit: '200kb' }));
+app.use(express.urlencoded({ limit: '200kb', extended: true }));
+
+// Apply global rate limiting to ALL routes
+app.use(globalLimiter);
+
+// Supabase setup
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_KEY
 );
 
+// Multer setup
 const storage = multer.memoryStorage();
 const upload = multer({ 
   storage: storage,
   limits: { fileSize: 5 * 1024 * 1024 }
 });
 
+// Supabase middleware
 app.use((req, res, next) => {
   req.supabase = supabase;
   next();
 });
 
+// Auth middleware
 const authenticate = async (req, res, next) => {
   const token = req.headers.authorization?.split(' ')[1];
   if (!token) {
@@ -75,6 +100,7 @@ const authenticate = async (req, res, next) => {
   }
 };
 
+// Routes
 app.use('/api/legal', legalRoutes);
 
 app.get('/health', (req, res) => {
@@ -88,13 +114,15 @@ app.get('/health', (req, res) => {
       exif_preservation: true,
       compression: 'client_side',
       security: true,
+      email_validation: true,
+      rate_limiting: true,
       legal_pages: true
     }
   });
 });
 
-// 1. REGISTER - GTA ENFORCEMENT
-app.post('/api/register', signupLimiter, async (req, res) => {
+// 1. REGISTER - Security hardened
+app.post('/api/register', authLimiter, emailValidationMiddleware, async (req, res) => {
   try {
     console.log('[REGISTER] Raw request:', JSON.stringify(req.body));
     
@@ -168,7 +196,7 @@ app.post('/api/register', signupLimiter, async (req, res) => {
         username: username.trim(),
         password_hash,
         age: parseInt(age),
-        city: normalizedCity, // STORES AS 'toronto' for GTA cluster
+        city: normalizedCity,
         gender,
         interested_in: uniqueCanonical,
         email_verified: true,
@@ -196,8 +224,8 @@ app.post('/api/register', signupLimiter, async (req, res) => {
   }
 });
 
-// 2. Login endpoint
-app.post('/api/login', async (req, res) => {
+// 2. LOGIN - Security hardened
+app.post('/api/login', authLimiter, async (req, res) => {
   try {
     const { email, password } = req.body;
     
@@ -323,11 +351,10 @@ app.get('/api/profiles', authenticate, async (req, res) => {
       return acc;
     }, []) || [];
     
-    // GTA CLUSTER: All 'toronto' users match together
     let { data: profiles, error } = await supabase
       .from('users')
       .select('id, username, age, city, bio, gender, interested_in, mode, photos(*)')
-      .eq('city', 'toronto') // CHANGED: GTA cluster (was .ilike('city', currentUser.city))
+      .eq('city', 'toronto')
       .eq('is_suspended', false)
       .limit(50)
       .order('created_at', { ascending: false });
@@ -355,7 +382,7 @@ app.get('/api/profiles', authenticate, async (req, res) => {
   }
 });
 
-// 6. Swipe endpoint
+// 6-18: All remaining routes (swipe, matches, messages, upload, etc.)
 app.post('/api/swipe', authenticate, swipeLimiter, async (req, res) => {
   try {
     const { targetId, direction } = req.body;
@@ -431,7 +458,6 @@ app.post('/api/swipe', authenticate, swipeLimiter, async (req, res) => {
   }
 });
 
-// 7. Get matches
 app.get('/api/matches', authenticate, async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -470,7 +496,6 @@ app.get('/api/matches', authenticate, async (req, res) => {
   }
 });
 
-// 8. Unmatch
 app.delete('/api/matches/:matchId', authenticate, async (req, res) => {
   try {
     const { matchId } = req.params;
@@ -506,7 +531,6 @@ app.delete('/api/matches/:matchId', authenticate, async (req, res) => {
   }
 });
 
-// 9. Send message
 app.post('/api/messages', authenticate, messageLimiter, async (req, res) => {
   try {
     const { matchId, content } = req.body;
@@ -555,7 +579,6 @@ app.post('/api/messages', authenticate, messageLimiter, async (req, res) => {
   }
 });
 
-// 10. Get messages
 app.get('/api/messages/:matchId', authenticate, async (req, res) => {
   try {
     const { matchId } = req.params;
@@ -600,7 +623,6 @@ app.get('/api/messages/:matchId', authenticate, async (req, res) => {
   }
 });
 
-// 11. UPLOAD PHOTO - 6 PHOTO LIMIT + EXIF PRESERVATION
 app.post('/api/upload', authenticate, uploadLimiter, upload.single('photo'), validatePhotoUniqueness, validatePhotoType, async (req, res) => {
   try {
     console.log('[UPLOAD] Request received. File present:', !!req.file);
@@ -626,7 +648,6 @@ app.post('/api/upload', authenticate, uploadLimiter, upload.single('photo'), val
       .select('id')
       .eq('user_id', req.userId);
       
-    // CHANGED: 6 photo limit (was 3)
     if (existingPhotos && existingPhotos.length >= 6) {
       return res.status(400).json({ error: 'Maximum 6 photos allowed' });
     }
@@ -658,9 +679,6 @@ app.post('/api/upload', authenticate, uploadLimiter, upload.single('photo'), val
       .from('photos')
       .getPublicUrl(fileName);
       
-    // NOTE: EXIF data is preserved in the file stored in Supabase Storage
-    // Client compresses but preserves EXIF via browser-image-compression library
-    // Future: Add exif_data column to extract and store for fake detection
     const { error: dbError } = await supabase
       .from('photos')
       .insert({ 
@@ -684,7 +702,6 @@ app.post('/api/upload', authenticate, uploadLimiter, upload.single('photo'), val
   }
 });
 
-// 12. Update profile
 app.put('/api/profile', authenticate, async (req, res) => {
   try {
     const { bio, contact_method, contact_info, gender, interested_in } = req.body;
@@ -722,7 +739,6 @@ app.put('/api/profile', authenticate, async (req, res) => {
   }
 });
 
-// 13. Block user
 app.post('/api/block', authenticate, async (req, res) => {
   try {
     const { targetId } = req.body;
@@ -754,7 +770,6 @@ app.post('/api/block', authenticate, async (req, res) => {
   }
 });
 
-// 14. Report user
 app.post('/api/report', authenticate, async (req, res) => {
   try {
     const { targetId, reason, details } = req.body;
@@ -800,7 +815,6 @@ app.post('/api/report', authenticate, async (req, res) => {
   }
 });
 
-// 15. Update user mode
 app.put('/api/mode', authenticate, async (req, res) => {
   try {
     const { mode } = req.body;
@@ -828,7 +842,6 @@ app.put('/api/mode', authenticate, async (req, res) => {
   }
 });
 
-// 16. Get today's challenge
 app.get('/api/challenge/today', authenticate, async (req, res) => {
   try {
     const challenge = getTodayChallenge();
@@ -840,7 +853,6 @@ app.get('/api/challenge/today', authenticate, async (req, res) => {
   }
 });
 
-// 17. Get challenge stats
 app.get('/api/challenge/stats', authenticate, async (req, res) => {
   try {
     const stats = await getUserChallengeStats(req.userId, supabase);
@@ -857,7 +869,6 @@ app.get('/api/challenge/stats', authenticate, async (req, res) => {
   }
 });
 
-// 18. Complete challenge
 app.post('/api/challenge/complete', authenticate, async (req, res) => {
   try {
     const { challengeId } = req.body;
@@ -893,7 +904,7 @@ app.post('/api/challenge/complete', authenticate, async (req, res) => {
   }
 });
 
-// ERROR HANDLING MIDDLEWARE
+// ERROR HANDLING
 app.use((err, req, res, next) => {
   if (err instanceof multer.MulterError) {
     if (err.code === 'LIMIT_FILE_SIZE') {
@@ -912,10 +923,12 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Server error. Please try again.' });
 });
 
+// START SERVER
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ ScentedSoleMates Backend running on port ${PORT}`);
-  console.log(`🌍 GTA Metro Cluster: ACTIVE (all cities → toronto)`);
+  console.log(`🔒 Security: helmet + rate limiting + email validation`);
+  console.log(`🌐 GTA Metro Cluster: ACTIVE (all cities → toronto)`);
   console.log(`📸 Photo limit: 6 (upgraded from 3)`);
   console.log(`📊 EXIF: Preserved for fake detection`);
   console.log(`🔐 Auth: Bcrypt (working perfectly)`);
